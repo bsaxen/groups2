@@ -1,3 +1,12 @@
+Directory structure:
+
+app.py
+templates/
+  index.html
+
+
+Prompt:
+
 make web application (frontend, backend). Use html,python and javascript and no database.
 The concept is: M is set of objects identified by a positive integer, Example 1,2,3,4,7,54,23,22
 An object can have three states: 1,2,3. Initial state is always 3. The only allowed state transitions are: 3->1, 3->2
