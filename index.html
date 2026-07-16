@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>State Deduction Visualizer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f9; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+        .controls { padding-bottom: 15px; border-bottom: 2px solid #ccc; margin-bottom: 15px; }
+        button { padding: 6px 12px; margin-right: 5px; cursor: pointer; }
+        .main-container { display: flex; gap: 20px; flex: 1; overflow: hidden; }
+        
+        .panel { flex: 1; background: #fff; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); padding: 15px; display: flex; flex-direction: column; }
+        .panel-title { margin-top: 0; font-size: 1.2em; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .scroll-area { flex: 1; overflow-y: auto; align-content: flex-start; }
+        
+        /* Compact Objects View */
+        .object-box { 
+            display: inline-block; width: 40px; height: 30px; line-height: 30px; 
+            text-align: center; margin: 2px; cursor: pointer; color: white; 
+            font-weight: bold; font-size: 12px; border-radius: 4px; user-select: none;
+        }
+        .state-3 { background-color: blue; }
+        .state-2 { background-color: red; }
+        .state-1 { background-color: green; }
+
+        /* Compact Groups View */
+        .group-box { padding: 6px; margin: 4px; border: 1px solid #999; font-size: 12px; border-radius: 4px; display: inline-block; }
+        .group-yellow { background-color: yellow; }
+        .group-white { background-color: white; }
+        .group-item { display: inline-block; padding: 2px 5px; margin: 0 2px; color: white; border-radius: 3px; font-weight: bold; }
+        .item-state-2 { background-color: red; }
+        .item-state-1 { background-color: green; }
+        .item-grey { background-color: grey !important; color: #ddd; }
+
+        .instructions { font-size: 0.9em; color: #555; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <input type="file" id="fileInput" accept=".txt">
+        <button onclick="uploadFile()">Upload Groups File</button>
+        <button onclick="resetAllStates()">Reset All States (to 3)</button>
+        <button onclick="runBWL()">Run BWL Logic</button>
+    </div>
+
+    <div class="main-container">
+        <div class="panel">
+            <h2 class="panel-title">Objects</h2>
+            <div class="instructions">
+                <strong>Controls:</strong> Left-Click to set State 1 (Green) | Right-Click to set State 2 (Red). <br>
+                <em>Initial State: 3 (Blue). Once changed, an object must be globally reset to go back to 3.</em>
+            </div>
+            <div class="scroll-area" id="objects-container"></div>
+        </div>
+
+        <div class="panel">
+            <h2 class="panel-title">Groups</h2>
+            <div class="scroll-area" id="groups-container"></div>
+        </div>
+    </div>
+
+    <script>
+        let objects = {}; 
+        let groups = {}; 
+        let obj_to_groups = {}; 
+        let propagationQueue = [];
+
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            if (!fileInput.files[0]) return alert("Please select a file first.");
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            const response = await fetch('/upload', { method: 'POST', body: formData });
+            const data = await response.json();
+            
+            if (data.error) return alert(data.error);
+
+            initializeSystem(data.objects, data.groups);
+        }
+
+        function initializeSystem(objArray, groupData) {
+            objects = {};
+            obj_to_groups = {};
+            groups = groupData;
+
+            objArray.forEach(id => {
+                objects[id] = 3;
+                obj_to_groups[id] = [];
+            });
+
+            for (let gId in groups) {
+                groups[gId].items.forEach(item => {
+                    if (obj_to_groups[item.id]) {
+                        obj_to_groups[item.id].push({ groupId: gId, sign: item.sign });
+                    }
+                });
+            }
+
+            renderAll();
+        }
+
+        function resetAllStates() {
+            if (Object.keys(objects).length === 0) return;
+            
+            for (let id in objects) objects[id] = 3;
+            
+            for (let gId in groups) {
+                groups[gId].bg = 'white';
+                groups[gId].items.forEach(item => item.is_grey = false);
+            }
+            
+            propagationQueue = [];
+            renderAll();
+        }
+
+        function handleClick(e, id, targetState) {
+            e.preventDefault(); 
+            if (objects[id] !== 3) return; 
+            
+            propagationQueue.push({ id: id, state: targetState });
+            processQueue(true);
+        }
+
+        // --- FAST STATE SAVING / RESTORING FOR BWL ---
+        function saveState() {
+            let savedObjects = {};
+            for (let k in objects) savedObjects[k] = objects[k];
+            
+            let savedGroups = {};
+            for (let k in groups) {
+                let g = groups[k];
+                let itemsGreyStatus = g.items.map(i => i.is_grey); 
+                savedGroups[k] = { bg: g.bg, itemsGreyStatus: itemsGreyStatus };
+            }
+            return { objects: savedObjects, groups: savedGroups };
+        }
+
+        function restoreState(backup) {
+            for (let k in backup.objects) objects[k] = backup.objects[k];
+            for (let k in backup.groups) {
+                groups[k].bg = backup.groups[k].bg;
+                for (let i = 0; i < groups[k].items.length; i++) {
+                    groups[k].items[i].is_grey = backup.groups[k].itemsGreyStatus[i];
+                }
+            }
+        }
+
+        function isAnyGroupAllGrey() {
+            for (let gId in groups) {
+                let group = groups[gId];
+                if (group.bg !== 'yellow') {
+                    let allGrey = group.items.every(i => i.is_grey);
+                    if (allGrey && group.items.length > 0) return true; // Contradiction found
+                }
+            }
+            return false;
+        }
+
+        // --- BWL LOGIC ---
+        function runBWL() {
+            let objIds = Object.keys(objects).map(Number).sort((a,b) => a-b);
+            
+            for (let i = 0; i < objIds.length; i++) {
+                let objId = objIds[i];
+                
+                // Only process objects still in state 3
+                if (objects[objId] === 3) {
+                    
+                    // 1. Snapshot the state
+                    let backup = saveState();
+                    
+                    // 2. Simulate setting object to state 1
+                    propagationQueue = [{ id: objId, state: 1 }];
+                    processQueue(false); // Process silently, NO DOM UPDATES
+                    
+                    // 3. Check for consequence
+                    let conflict = isAnyGroupAllGrey();
+                    
+                    // 4. Restore original state
+                    restoreState(backup);
+                    propagationQueue = []; 
+                    
+                    // 5. If simulated State 1 caused all items in a group to go grey, permanently assign State 2
+                    if (conflict) {
+                        propagationQueue = [{ id: objId, state: 2 }];
+                        processQueue(true); // Process normally WITH visual DOM updates
+                    }
+                }
+            }
+        }
+
+        // Process Queue now accepts a boolean to skip UI updates during background simulations
+        function processQueue(updateDOM = true) {
+            while (propagationQueue.length > 0) {
+                let task = propagationQueue.shift();
+                let objId = task.id;
+                let newState = task.state;
+
+                if (objects[objId] !== 3) continue;
+
+                // 1. Assign State
+                objects[objId] = newState;
+
+                // 2. DOM Update
+                if (updateDOM) {
+                    let objEl = document.getElementById('obj-' + objId);
+                    if (objEl) objEl.className = 'object-box state-' + newState;
+                }
+
+                // 3. Process Dependent Groups
+                let relatedGroups = obj_to_groups[objId] || [];
+                relatedGroups.forEach(rel => {
+                    let gId = rel.groupId;
+                    let sign = rel.sign;
+                    let group = groups[gId];
+
+                    if (sign === newState) {
+                        if (group.bg !== 'yellow') {
+                            group.bg = 'yellow';
+                            if (updateDOM) {
+                                document.getElementById('group-' + gId).className = 'group-box group-yellow';
+                            }
+                        }
+                    } else {
+                        let item = group.items.find(i => i.id === objId);
+                        if (item && !item.is_grey) {
+                            item.is_grey = true;
+                            if (updateDOM) {
+                                document.getElementById(`gitem-${gId}-${objId}`).className = 'group-item item-grey';
+                            }
+                        }
+
+                        if (group.bg !== 'yellow') {
+                            let nonGreyItems = group.items.filter(i => !i.is_grey);
+                            if (nonGreyItems.length === 1) {
+                                let lastItem = nonGreyItems[0];
+                                if (objects[lastItem.id] === 3) {
+                                    propagationQueue.push({ id: lastItem.id, state: lastItem.sign });
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function renderAll() {
+            let objHtml = '';
+            let sortedObjects = Object.keys(objects).map(Number).sort((a,b)=>a-b);
+            sortedObjects.forEach(id => {
+                objHtml += `<div id="obj-${id}" class="object-box state-${objects[id]}" 
+                                 onclick="handleClick(event, ${id}, 1)" 
+                                 oncontextmenu="handleClick(event, ${id}, 2)">${id}</div>`;
+            });
+            document.getElementById('objects-container').innerHTML = objHtml;
+
+            let groupHtml = '';
+            for (let gId in groups) {
+                let group = groups[gId];
+                groupHtml += `<div id="group-${gId}" class="group-box group-${group.bg === 'yellow' ? 'yellow' : 'white'}">`;
+                groupHtml += `<strong>${gId}:</strong> `;
+                group.items.forEach(item => {
+                    let cls = item.is_grey ? 'item-grey' : (item.sign === 1 ? 'item-state-1' : 'item-state-2');
+                    let prefix = item.sign === 1 ? '+' : '-';
+                    groupHtml += `<span id="gitem-${gId}-${item.id}" class="group-item ${cls}">${prefix}${item.id}</span>`;
+                });
+                groupHtml += `</div>`;
+            }
+            document.getElementById('groups-container').innerHTML = groupHtml;
+        }
+    </script>
+</body>
+</html>
