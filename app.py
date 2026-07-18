@@ -23,7 +23,7 @@ def upload_file():
 
     for line in lines:
         line = line.strip()
-        if not line or ':' not in line:
+        if not line or ':' not in line or '#' in line:
             continue
             
         group_id, items_str = line.split(':', 1)
